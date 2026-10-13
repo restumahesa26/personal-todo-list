@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Edit2,
   GripVertical,
+  Loader2,
 } from "lucide-react";
 
 interface TaskItemProps {
@@ -29,6 +30,7 @@ export const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
     updateTaskCategory,
     editTaskTitle,
     deleteTask,
+    isTaskSyncing,
   } = useTodo();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -114,10 +116,25 @@ export const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
           isCompleted
             ? "bg-emerald-600 border-emerald-600 text-white"
             : "border-zinc-300 dark:border-zinc-600 hover:border-zinc-400 dark:hover:border-zinc-500 bg-transparent"
-        }`}
+        } ${isTaskSyncing(task.id) ? "ring-2 ring-sky-400/30" : ""}`}
         aria-label={isCompleted ? "Tandai belum selesai" : "Tandai selesai"}
+        title={
+          isTaskSyncing(task.id)
+            ? "Menyimpan ke cloud..."
+            : isCompleted
+            ? "Tandai belum selesai"
+            : "Tandai selesai"
+        }
       >
-        {isCompleted && <Check className="w-3.5 h-3.5 stroke-[2.5]" />}
+        {isTaskSyncing(task.id) ? (
+          <Loader2
+            className={`w-3 h-3 animate-spin stroke-[2.5] ${
+              isCompleted ? "text-white" : "text-sky-600 dark:text-sky-400"
+            }`}
+          />
+        ) : isCompleted ? (
+          <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+        ) : null}
       </button>
 
       {/* Main Content Area */}
@@ -173,6 +190,14 @@ export const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
                   </>
                 )}
               </button>
+
+              {/* In-flight Sync indicator for this specific task */}
+              {isTaskSyncing(task.id) && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 animate-pulse">
+                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  <span>Menyimpan...</span>
+                </span>
+              )}
 
               {/* Quick Timeframe Shift Buttons */}
               <div className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150 flex items-center flex-wrap gap-1">

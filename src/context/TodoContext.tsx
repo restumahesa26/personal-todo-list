@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import {
   Task,
   Category,
@@ -8,8 +8,10 @@ import {
   CategoryFilter,
   TaskStatus,
   ConnectionStatus,
+  SyncStatus,
 } from "@/types/todo";
-import { db, isFirebaseConfigured } from "@/lib/firebase";
+import { db, isFirebaseConfigured, isDevMode } from "@/lib/firebase";
+import { INITIAL_DUMMY_TASKS } from "@/lib/dummyData";
 import {
   collection,
   doc,
@@ -25,9 +27,14 @@ interface TodoContextType {
   loading: boolean;
   isFirebaseActive: boolean;
   isConnected: boolean;
+  isDevMode: boolean;
+  resetDummyData: () => void;
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   retryConnection: () => void;
+  syncStatus: SyncStatus;
+  pendingSyncCount: number;
+  isTaskSyncing: (id: string) => boolean;
   categoryFilter: CategoryFilter;
   setCategoryFilter: (filter: CategoryFilter) => void;
   searchQuery: string;
@@ -44,7 +51,45 @@ interface TodoContextType {
 
 const TodoContext = createContext<TodoContextType | undefined>(undefined);
 
-const CACHED_TASKS_KEY = "mdf_cached_tasks_v3";
+const CACHED_TASKS_KEY = isDevMode ? "mdf_cached_tasks_dev_v1" : "mdf_cached_tasks_v3";
+const PENDING_MUTATIONS_KEY = "mdf_pending_sync_v2";
+
+// Helper untuk membaca pending mutations yang belum terkonfirmasi dari localStorage
+const getPendingMutations = (): Record<string, Record<string, unknown>> => {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(PENDING_MUTATIONS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+const savePendingMutation = (id: string, payload: Record<string, unknown>) => {
+  if (typeof window === "undefined") return;
+  try {
+    const current = getPendingMutations();
+    current[id] = payload;
+    localStorage.setItem(PENDING_MUTATIONS_KEY, JSON.stringify(current));
+  } catch {
+    // ignore
+  }
+};
+
+const removePendingMutation = (id: string) => {
+  if (typeof window === "undefined") return;
+  try {
+    const current = getPendingMutations();
+    delete current[id];
+    if (Object.keys(current).length === 0) {
+      localStorage.removeItem(PENDING_MUTATIONS_KEY);
+    } else {
+      localStorage.setItem(PENDING_MUTATIONS_KEY, JSON.stringify(current));
+    }
+  } catch {
+    // ignore
+  }
+};
 
 export function TodoProvider({ children }: { children: React.ReactNode }) {
   // 1. Initial state is [] to guarantee server and client render identical HTML on initial hydration pass
@@ -56,11 +101,21 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [retryTrigger, setRetryTrigger] = useState(0);
 
-  const isFirebaseActive = Boolean(isFirebaseConfigured && db);
+  // Sync UX State
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [syncingTaskIds, setSyncingTaskIds] = useState<Set<string>>(new Set());
 
-  // Directly CONNECTED in 0ms if .env is configured
+  // Refs for race condition & conflict resolution
+  const pendingSyncRef = useRef<Set<string>>(new Set());
+  const pendingDeletesRef = useRef<Set<string>>(new Set());
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const isFirebaseActive = Boolean(isFirebaseConfigured && db && !isDevMode);
+
+  // Directly CONNECTED in 0ms if in dev mode or .env is configured
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(
-    isFirebaseConfigured ? "connected" : "not_configured"
+    isDevMode ? "connected" : (isFirebaseConfigured ? "connected" : "not_configured")
   );
 
   const isConnected = connectionStatus === "connected";
@@ -74,6 +129,40 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Sync state tracking helpers
+  const markTaskSyncing = useCallback((id: string) => {
+    pendingSyncRef.current.add(id);
+    setSyncingTaskIds(new Set(pendingSyncRef.current));
+    setPendingSyncCount(pendingSyncRef.current.size);
+    setSyncStatus("syncing");
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current);
+    }
+  }, []);
+
+  const markTaskSynced = useCallback((id: string) => {
+    pendingSyncRef.current.delete(id);
+    setSyncingTaskIds(new Set(pendingSyncRef.current));
+    setPendingSyncCount(pendingSyncRef.current.size);
+    if (pendingSyncRef.current.size === 0) {
+      setSyncStatus("synced");
+      syncTimeoutRef.current = setTimeout(() => {
+        setSyncStatus("idle");
+      }, 3000);
+    }
+  }, []);
+
+  const markTaskError = useCallback((id: string) => {
+    pendingSyncRef.current.delete(id);
+    setSyncingTaskIds(new Set(pendingSyncRef.current));
+    setPendingSyncCount(pendingSyncRef.current.size);
+    setSyncStatus("error");
+  }, []);
+
+  const isTaskSyncing = useCallback((id: string) => {
+    return syncingTaskIds.has(id);
+  }, [syncingTaskIds]);
+
   // Hydrate on mount in case window was not ready during SSR
   useEffect(() => {
     try {
@@ -82,15 +171,76 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed) && parsed.length > 0) {
           setTasks((prev) => (prev.length === 0 ? parsed : prev));
+          return;
         }
       }
+
+      // Jika dalam mode dev dan cache kosong, gunakan data dummy bawaan
+      if (isDevMode) {
+        setTasks(INITIAL_DUMMY_TASKS);
+        saveToLocalCache(INITIAL_DUMMY_TASKS);
+      }
     } catch {
-      // ignore
+      if (isDevMode) {
+        setTasks(INITIAL_DUMMY_TASKS);
+      }
     }
+  }, [saveToLocalCache]);
+
+  // Reset data dummy ke kondisi awal
+  const resetDummyData = useCallback(() => {
+    if (!isDevMode) return;
+    setTasks(INITIAL_DUMMY_TASKS);
+    saveToLocalCache(INITIAL_DUMMY_TASKS);
+  }, [saveToLocalCache]);
+
+  // Intercept refresh / close tab saat sync masih berlangsung (UX Safety Guard)
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pendingSyncRef.current.size > 0) {
+        e.preventDefault();
+        e.returnValue = "Perubahan sedang disimpan ke cloud. Tetap muat ulang?";
+        return e.returnValue;
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
   }, []);
 
-  // 2. Real-time direct Firestore sync with smart merge (prevents overwriting local tasks)
+  // Pulihkan perubahan pending yang belum selesai jika sebelumnya terjadi refresh
   useEffect(() => {
+    if (isDevMode || !isFirebaseConfigured || !db) return;
+
+    const pending = getPendingMutations();
+    const pendingIds = Object.keys(pending);
+    if (pendingIds.length === 0) return;
+
+    const firestore = db;
+    pendingIds.forEach(async (id) => {
+      markTaskSyncing(id);
+      try {
+        const taskRef = doc(firestore, "tasks", id);
+        await updateDoc(taskRef, pending[id]);
+        removePendingMutation(id);
+        markTaskSynced(id);
+      } catch (err) {
+        console.warn(`[Sync Recovery] Gagal sinkronisasi task ${id}:`, err);
+        markTaskError(id);
+      }
+    });
+  }, [markTaskSyncing, markTaskSynced, markTaskError]);
+
+  // 2. Real-time direct Firestore sync with smart conflict resolution
+  useEffect(() => {
+    if (isDevMode) {
+      setConnectionStatus("connected");
+      setConnectionError(null);
+      return;
+    }
+
     if (!isFirebaseConfigured || !db) {
       setConnectionStatus("not_configured");
       setConnectionError("Konfigurasi Firebase belum diisi di file .env");
@@ -114,26 +264,61 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
             timeframe: data.timeframe || "today",
             createdAt: typeof data.createdAt === "number" ? data.createdAt : Date.now(),
             completedAt: typeof data.completedAt === "number" ? data.completedAt : undefined,
+            updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : undefined,
           });
         });
 
         setTasks((currentTasks) => {
-          // Create map from server tasks
-          const taskMap = new Map<string, Task>();
-          serverTasks.forEach((t) => taskMap.set(t.id, t));
+          const currentMap = new Map<string, Task>();
+          currentTasks.forEach((t) => currentMap.set(t.id, t));
 
-          // Retain recent local tasks that haven't been acknowledged by Firestore yet
+          const mergedMap = new Map<string, Task>();
+          const pendingMutations = getPendingMutations();
+
+          // Proses setiap dokumen dari server
+          for (const serverTask of serverTasks) {
+            // Jika dokumen sedang dalam proses hapus lokal, jangan tampilkan kembali
+            if (pendingDeletesRef.current.has(serverTask.id)) {
+              continue;
+            }
+
+            const localTask = currentMap.get(serverTask.id);
+
+            if (!localTask) {
+              mergedMap.set(serverTask.id, serverTask);
+            } else {
+              // Smart Merge: Cegah penimpaan task yang baru saja dicentang / dimodifikasi di client
+              const isPendingSync =
+                pendingSyncRef.current.has(serverTask.id) ||
+                Boolean(pendingMutations[serverTask.id]);
+              const localIsNewer =
+                typeof localTask.updatedAt === "number" &&
+                typeof serverTask.updatedAt === "number" &&
+                localTask.updatedAt > serverTask.updatedAt;
+              const recentlyModifiedLocally =
+                typeof localTask.updatedAt === "number" &&
+                Date.now() - localTask.updatedAt < 25000; // 25 detik grace period
+
+              if (isPendingSync || localIsNewer || recentlyModifiedLocally) {
+                // Pertahankan state lokal yang lebih segar (misal sudah dicentang)
+                mergedMap.set(serverTask.id, localTask);
+              } else {
+                mergedMap.set(serverTask.id, serverTask);
+              }
+            }
+          }
+
+          // Pertahankan task lokal baru yang belum sempat tercatat di snapshot server
           const now = Date.now();
           currentTasks.forEach((localTask) => {
-            if (!taskMap.has(localTask.id)) {
-              // Keep local task if created within the last 5 minutes to prevent premature wipe
+            if (!mergedMap.has(localTask.id) && !pendingDeletesRef.current.has(localTask.id)) {
               if (now - localTask.createdAt < 300000) {
-                taskMap.set(localTask.id, localTask);
+                mergedMap.set(localTask.id, localTask);
               }
             }
           });
 
-          const merged = Array.from(taskMap.values()).sort(
+          const merged = Array.from(mergedMap.values()).sort(
             (a, b) => b.createdAt - a.createdAt
           );
 
@@ -146,7 +331,6 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
       },
       (error) => {
         console.warn("Firestore sync warning:", error);
-        // Only set error status if it's permission-denied
         if (error.code === "permission-denied") {
           setConnectionStatus("error");
           setConnectionError(
@@ -169,30 +353,32 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
     setRetryTrigger((prev) => prev + 1);
   };
 
-  // Add Task (Instant 0ms Optimistic UI + Non-blocking Firestore Sync)
+  // Add Task (Instant Optimistic + Background Sync)
   const addTask = async (title: string, category: Category, timeframe: Timeframe) => {
     const cleanTitle = title.trim();
     if (!cleanTitle) return;
 
+    const now = Date.now();
     const newTask: Task = {
-      id: "task_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9),
+      id: "task_" + now + "_" + Math.random().toString(36).substring(2, 9),
       title: cleanTitle,
       category,
       timeframe,
       status: "pending",
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
     };
 
-    // 1. Immediately update state & localStorage (0ms perceived latency)
+    // 1. Instant 0ms UI update
     setTasks((prev) => {
       const next = [newTask, ...prev];
       saveToLocalCache(next);
       return next;
     });
 
-    // 2. Sync to Firestore in background without blocking the caller
-    if (db) {
-      const firestore = db;
+    // 2. Sync to Firestore in background
+    if (db && !isDevMode) {
+      markTaskSyncing(newTask.id);
       const payload: Record<string, unknown> = {
         id: newTask.id,
         title: newTask.title,
@@ -200,25 +386,36 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
         timeframe: newTask.timeframe,
         status: newTask.status,
         createdAt: newTask.createdAt,
+        updatedAt: now,
       };
 
-      const taskRef = doc(firestore, "tasks", newTask.id);
-      setDoc(taskRef, payload).catch((err) => {
+      savePendingMutation(newTask.id, payload);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", newTask.id);
+        await setDoc(taskRef, payload);
+        removePendingMutation(newTask.id);
+        markTaskSynced(newTask.id);
+      } catch (err) {
         console.warn("Background Firestore setDoc notice:", err);
-      });
+        markTaskError(newTask.id);
+      }
     }
   };
 
-  // Toggle Task Status (Instant Optimistic + Background Sync)
+  // Toggle Task Status (Instant Optimistic + Bulletproof Queue & Background Sync)
   const toggleTaskStatus = async (id: string) => {
     let updatedTask: Task | undefined;
+    const now = Date.now();
 
+    // 1. Instant optimistic update
     setTasks((prev) => {
       const next = prev.map((t) => {
         if (t.id === id) {
           const newStatus: TaskStatus = t.status === "pending" ? "completed" : "pending";
-          const completedAt = newStatus === "completed" ? Date.now() : undefined;
-          updatedTask = { ...t, status: newStatus, completedAt };
+          const completedAt = newStatus === "completed" ? now : undefined;
+          updatedTask = { ...t, status: newStatus, completedAt, updatedAt: now };
           return updatedTask;
         }
         return t;
@@ -227,51 +424,81 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
       return next;
     });
 
-    if (db && updatedTask) {
-      const firestore = db;
-      const taskRef = doc(firestore, "tasks", id);
+    // 2. Reliable background sync with mutation tracking
+    if (db && !isDevMode && updatedTask) {
+      markTaskSyncing(id);
       const updateData: Record<string, unknown> = {
         status: (updatedTask as Task).status,
         completedAt: (updatedTask as Task).completedAt || null,
+        updatedAt: now,
       };
 
-      updateDoc(taskRef, updateData).catch((err) => {
+      savePendingMutation(id, updateData);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", id);
+        await updateDoc(taskRef, updateData);
+        removePendingMutation(id);
+        markTaskSynced(id);
+      } catch (err) {
         console.warn("Background Firestore updateDoc notice:", err);
-      });
+        markTaskError(id);
+      }
     }
   };
 
   // Update Timeframe (Instant Optimistic + Background Sync)
   const updateTaskTimeframe = async (id: string, timeframe: Timeframe) => {
+    const now = Date.now();
     setTasks((prev) => {
-      const next = prev.map((t) => (t.id === id ? { ...t, timeframe } : t));
+      const next = prev.map((t) => (t.id === id ? { ...t, timeframe, updatedAt: now } : t));
       saveToLocalCache(next);
       return next;
     });
 
-    if (db) {
-      const firestore = db;
-      const taskRef = doc(firestore, "tasks", id);
-      updateDoc(taskRef, { timeframe }).catch((err) => {
+    if (db && !isDevMode) {
+      markTaskSyncing(id);
+      const updateData = { timeframe, updatedAt: now };
+      savePendingMutation(id, updateData);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", id);
+        await updateDoc(taskRef, updateData);
+        removePendingMutation(id);
+        markTaskSynced(id);
+      } catch (err) {
         console.warn("Background Firestore updateTimeframe notice:", err);
-      });
+        markTaskError(id);
+      }
     }
   };
 
   // Update Category (Instant Optimistic + Background Sync)
   const updateTaskCategory = async (id: string, category: Category) => {
+    const now = Date.now();
     setTasks((prev) => {
-      const next = prev.map((t) => (t.id === id ? { ...t, category } : t));
+      const next = prev.map((t) => (t.id === id ? { ...t, category, updatedAt: now } : t));
       saveToLocalCache(next);
       return next;
     });
 
-    if (db) {
-      const firestore = db;
-      const taskRef = doc(firestore, "tasks", id);
-      updateDoc(taskRef, { category }).catch((err) => {
+    if (db && !isDevMode) {
+      markTaskSyncing(id);
+      const updateData = { category, updatedAt: now };
+      savePendingMutation(id, updateData);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", id);
+        await updateDoc(taskRef, updateData);
+        removePendingMutation(id);
+        markTaskSynced(id);
+      } catch (err) {
         console.warn("Background Firestore updateCategory notice:", err);
-      });
+        markTaskError(id);
+      }
     }
   };
 
@@ -280,35 +507,58 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
     const clean = newTitle.trim();
     if (!clean) return;
 
+    const now = Date.now();
     setTasks((prev) => {
-      const next = prev.map((t) => (t.id === id ? { ...t, title: clean } : t));
+      const next = prev.map((t) => (t.id === id ? { ...t, title: clean, updatedAt: now } : t));
       saveToLocalCache(next);
       return next;
     });
 
-    if (db) {
-      const firestore = db;
-      const taskRef = doc(firestore, "tasks", id);
-      updateDoc(taskRef, { title: clean }).catch((err) => {
+    if (db && !isDevMode) {
+      markTaskSyncing(id);
+      const updateData = { title: clean, updatedAt: now };
+      savePendingMutation(id, updateData);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", id);
+        await updateDoc(taskRef, updateData);
+        removePendingMutation(id);
+        markTaskSynced(id);
+      } catch (err) {
         console.warn("Background Firestore editTitle notice:", err);
-      });
+        markTaskError(id);
+      }
     }
   };
 
   // Delete Task (Instant Optimistic + Background Sync)
   const deleteTask = async (id: string) => {
+    pendingDeletesRef.current.add(id);
+
     setTasks((prev) => {
       const next = prev.filter((t) => t.id !== id);
       saveToLocalCache(next);
       return next;
     });
 
-    if (db) {
-      const firestore = db;
-      const taskRef = doc(firestore, "tasks", id);
-      deleteDoc(taskRef).catch((err) => {
+    if (db && !isDevMode) {
+      markTaskSyncing(id);
+      removePendingMutation(id);
+
+      try {
+        const firestore = db;
+        const taskRef = doc(firestore, "tasks", id);
+        await deleteDoc(taskRef);
+        pendingDeletesRef.current.delete(id);
+        markTaskSynced(id);
+      } catch (err) {
         console.warn("Background Firestore deleteDoc notice:", err);
-      });
+        pendingDeletesRef.current.delete(id);
+        markTaskError(id);
+      }
+    } else {
+      pendingDeletesRef.current.delete(id);
     }
   };
 
@@ -316,11 +566,12 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
   const startNewDay = async (moveUnfinishedTodayToInbox: boolean) => {
     let movedTomorrow = 0;
     let movedUnfinished = 0;
+    const now = Date.now();
 
     const updated = tasks.map((t) => {
       if (t.timeframe === "tomorrow") {
         movedTomorrow++;
-        return { ...t, timeframe: "today" as Timeframe };
+        return { ...t, timeframe: "today" as Timeframe, updatedAt: now };
       }
       if (
         t.timeframe === "today" &&
@@ -328,7 +579,7 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
         moveUnfinishedTodayToInbox
       ) {
         movedUnfinished++;
-        return { ...t, timeframe: "inbox" as Timeframe };
+        return { ...t, timeframe: "inbox" as Timeframe, updatedAt: now };
       }
       return t;
     });
@@ -336,28 +587,30 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
     setTasks(updated);
     saveToLocalCache(updated);
 
-    if (db) {
+    if (db && !isDevMode) {
       try {
+        setSyncStatus("syncing");
         const firestore = db;
         const batch = writeBatch(firestore);
         tasks.forEach((t) => {
           if (t.timeframe === "tomorrow") {
             const ref = doc(firestore, "tasks", t.id);
-            batch.update(ref, { timeframe: "today" });
+            batch.update(ref, { timeframe: "today", updatedAt: now });
           } else if (
             t.timeframe === "today" &&
             t.status === "pending" &&
             moveUnfinishedTodayToInbox
           ) {
             const ref = doc(firestore, "tasks", t.id);
-            batch.update(ref, { timeframe: "inbox" });
+            batch.update(ref, { timeframe: "inbox", updatedAt: now });
           }
         });
-        batch.commit().catch((err) => {
-          console.warn("Background Firestore batch notice:", err);
-        });
+        await batch.commit();
+        setSyncStatus("synced");
+        setTimeout(() => setSyncStatus("idle"), 3000);
       } catch (err) {
         console.warn("Firestore batch setup error:", err);
+        setSyncStatus("error");
       }
     }
 
@@ -372,6 +625,8 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
 
     if (toRemove.length === 0) return;
 
+    toRemove.forEach((t) => pendingDeletesRef.current.add(t.id));
+
     const remaining = tasks.filter(
       (t) => !(t.status === "completed" && (!timeframe || t.timeframe === timeframe))
     );
@@ -379,20 +634,26 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
     setTasks(remaining);
     saveToLocalCache(remaining);
 
-    if (db) {
+    if (db && !isDevMode) {
       try {
+        setSyncStatus("syncing");
         const firestore = db;
         const batch = writeBatch(firestore);
         toRemove.forEach((t) => {
           const ref = doc(firestore, "tasks", t.id);
           batch.delete(ref);
         });
-        batch.commit().catch((err) => {
-          console.warn("Background Firestore clearCompleted notice:", err);
-        });
+        await batch.commit();
+        toRemove.forEach((t) => pendingDeletesRef.current.delete(t.id));
+        setSyncStatus("synced");
+        setTimeout(() => setSyncStatus("idle"), 3000);
       } catch (err) {
         console.warn("Firestore clearCompleted setup error:", err);
+        toRemove.forEach((t) => pendingDeletesRef.current.delete(t.id));
+        setSyncStatus("error");
       }
+    } else {
+      toRemove.forEach((t) => pendingDeletesRef.current.delete(t.id));
     }
   };
 
@@ -403,9 +664,14 @@ export function TodoProvider({ children }: { children: React.ReactNode }) {
         loading,
         isFirebaseActive,
         isConnected,
+        isDevMode,
+        resetDummyData,
         connectionStatus,
         connectionError,
         retryConnection,
+        syncStatus,
+        pendingSyncCount,
+        isTaskSyncing,
         categoryFilter,
         setCategoryFilter,
         searchQuery,

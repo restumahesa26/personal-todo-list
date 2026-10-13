@@ -13,6 +13,9 @@ import {
   SlidersHorizontal,
   CheckCircle2,
   Smartphone,
+  RotateCcw,
+  Loader2,
+  CloudCheck,
 } from "lucide-react";
 
 interface NavbarProps {
@@ -36,6 +39,10 @@ export const Navbar: React.FC<NavbarProps> = ({
     categoryFilter,
     setCategoryFilter,
     isConnected,
+    isDevMode,
+    resetDummyData,
+    syncStatus,
+    pendingSyncCount,
   } = useTodo();
 
   // Calculate today stats
@@ -81,6 +88,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
                   My Daily Focus
                 </h1>
+                {isDevMode && (
+                  <span
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
+                    title="Mode Dev aktif: Menggunakan data dummy lokal, koneksi Firebase dinonaktifkan."
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                    DEV DUMMY
+                  </span>
+                )}
               </div>
               <p className="text-xs text-zinc-700 dark:text-zinc-300 capitalize truncate">
                 {todayFormatted}
@@ -88,37 +104,93 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Middle: Daily progress pill (Desktop) */}
-          {isConnected ? (
-            <div className="hidden md:flex items-center gap-3 px-3 py-1.5 rounded-full bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/50">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <div className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                {todayTotal === 0 ? (
-                  <span>Belum ada tugas hari ini</span>
-                ) : (
-                  <span>
-                    {todayCompleted} dari {todayTotal} selesai ({todayProgressPercent}%)
-                  </span>
+          {/* Middle: Cloud Sync Status & Daily progress pill */}
+          <div className="flex items-center gap-2">
+            {/* Real-time Cloud Sync Status Indicator */}
+            {!isDevMode && isConnected && (
+              <>
+                {syncStatus === "syncing" && (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-sky-50 dark:bg-sky-950/60 border border-sky-300/80 dark:border-sky-800 text-[11px] font-medium text-sky-700 dark:text-sky-300 animate-in fade-in duration-150 shadow-2xs"
+                    title="Perubahan sedang disimpan ke database Firestore..."
+                  >
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600 dark:text-sky-400" />
+                    <span className="hidden sm:inline">Menyimpan</span>
+                    {pendingSyncCount > 1 ? (
+                      <span>({pendingSyncCount})</span>
+                    ) : (
+                      <span className="hidden sm:inline">ke cloud...</span>
+                    )}
+                  </div>
+                )}
+
+                {syncStatus === "synced" && (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300/80 dark:border-emerald-800 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition-all animate-in fade-in duration-200 shadow-2xs"
+                    title="Semua perubahan tersimpan di database Firestore"
+                  >
+                    <CloudCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span className="hidden sm:inline">Tersinkron ke cloud</span>
+                  </div>
+                )}
+
+                {syncStatus === "error" && (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 dark:bg-rose-950/60 border border-rose-300/80 dark:border-rose-800 text-[11px] font-medium text-rose-700 dark:text-rose-300 animate-in fade-in duration-150 shadow-2xs"
+                    title="Gagal menyimpan perubahan ke Firestore. Periksa koneksi internet."
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                    <span className="hidden sm:inline">Gagal sinkron</span>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Daily progress pill (Desktop) */}
+            {isConnected ? (
+              <div className="hidden md:flex items-center gap-3 px-3 py-1.5 rounded-full bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/50">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <div className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  {todayTotal === 0 ? (
+                    <span>Belum ada tugas hari ini</span>
+                  ) : (
+                    <span>
+                      {todayCompleted} dari {todayTotal} selesai ({todayProgressPercent}%)
+                    </span>
+                  )}
+                </div>
+                {todayTotal > 0 && (
+                  <div className="w-16 h-1.5 bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                      style={{ width: `${todayProgressPercent}%` }}
+                    />
+                  </div>
                 )}
               </div>
-              {todayTotal > 0 && (
-                <div className="w-16 h-1.5 bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                    style={{ width: `${todayProgressPercent}%` }}
-                  />
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-700 dark:text-amber-300 font-medium">
-              <AlertCircle className="w-3.5 h-3.5" />
-              <span>Database Belum Terhubung</span>
-            </div>
-          )}
+            ) : (
+              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-700 dark:text-amber-300 font-medium">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>Database Belum Terhubung</span>
+              </div>
+            )}
+          </div>
 
           {/* Right: Actions */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Reset Dummy Data (Hanya tampil di Mode Dev) */}
+            {isDevMode && (
+              <button
+                type="button"
+                onClick={resetDummyData}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors cursor-pointer"
+                title="Reset data dummy kembali ke daftar awal"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-zinc-500" />
+                <span className="hidden sm:inline">Reset Data</span>
+              </button>
+            )}
+
             {/* Mulai Hari Baru Button */}
             {isConnected && (
               <button

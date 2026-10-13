@@ -1,0 +1,78 @@
+import { Task } from "@/types/todo";
+
+export const INITIAL_DUMMY_TASKS: Task[] = [
+  {
+    id: "dummy-task-1",
+    title: "Menyelesaikan draft proposal sprint Q4",
+    category: "work",
+    status: "pending",
+    timeframe: "today",
+    createdAt: Date.now() - 1000 * 60 * 60 * 2, // 2 jam lalu
+  },
+  {
+    id: "dummy-task-2",
+    title: "Review pull request modul autentikasi",
+    category: "work",
+    status: "completed",
+    timeframe: "today",
+    createdAt: Date.now() - 1000 * 60 * 60 * 4,
+    completedAt: Date.now() - 1000 * 60 * 60,
+  },
+  {
+    id: "dummy-task-3",
+    title: "Beli kebutuhan dapur & buah mingguan",
+    category: "home",
+    status: "pending",
+    timeframe: "today",
+    createdAt: Date.now() - 1000 * 60 * 60 * 3,
+  },
+  {
+    id: "dummy-task-4",
+    title: "Olahraga pagi 20 menit (stretching & jogging)",
+    category: "home",
+    status: "completed",
+    timeframe: "today",
+    createdAt: Date.now() - 1000 * 60 * 60 * 6,
+    completedAt: Date.now() - 1000 * 60 * 60 * 5,
+  },
+  {
+    id: "dummy-task-5",
+    title: "Meeting evaluasi mingguan dengan tim produk",
+    category: "work",
+    status: "pending",
+    timeframe: "tomorrow",
+    createdAt: Date.now() - 1000 * 60 * 60 * 8,
+  },
+  {
+    id: "dummy-task-6",
+    title: "Antar pakaian kotor ke laundry kiloan",
+    category: "home",
+    status: "pending",
+    timeframe: "tomorrow",
+    createdAt: Date.now() - 1000 * 60 * 60 * 10,
+  },
+  {
+    id: "dummy-task-7",
+    title: "Riset tools automasi workflow AI",
+    category: "work",
+    status: "pending",
+    timeframe: "inbox",
+    createdAt: Date.now() - 1000 * 60 * 60 * 16,
+  },
+  {
+    id: "dummy-task-8",
+    title: "Cek promo tiket liburan akhir tahun",
+    category: "home",
+    status: "pending",
+    timeframe: "inbox",
+    createdAt: Date.now() - 1000 * 60 * 60 * 24,
+  },
+  {
+    id: "dummy-task-9",
+    title: "Jadwalkan servis ganti oli motor berkala",
+    category: "home",
+    status: "pending",
+    timeframe: "inbox",
+    createdAt: Date.now() - 1000 * 60 * 60 * 36,
+  },
+];

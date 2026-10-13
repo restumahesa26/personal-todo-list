@@ -13,6 +13,7 @@ export interface Task {
   createdAt: number;
   userId?: string;
   completedAt?: number;
+  updatedAt?: number;
 }
 
 export type CategoryFilter = 'all' | 'work' | 'home';
@@ -22,3 +23,6 @@ export type ConnectionStatus =
   | 'not_configured'
   | 'error'
   | 'connected';
+
+export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
+

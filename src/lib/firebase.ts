@@ -1,5 +1,17 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
-import { getFirestore, Firestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  Firestore,
+} from "firebase/firestore";
+
+// Cek apakah mode dev/dummy diaktifkan lewat variabel lingkungan
+export const isDevMode =
+  process.env.NEXT_PUBLIC_IS_DEV === "true" ||
+  process.env.NEXT_PUBLIC_DEV_MODE === "true" ||
+  process.env.NEXT_PUBLIC_USE_DUMMY_DATA === "true";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -18,10 +30,25 @@ export const isFirebaseConfigured = Boolean(
 let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
 
-if (typeof window !== "undefined" && isFirebaseConfigured) {
+// Hanya inisialisasi Firebase jika bukan dev mode dan kredensial tersedia
+if (typeof window !== "undefined" && isFirebaseConfigured && !isDevMode) {
   try {
-    app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-    db = getFirestore(app);
+    if (getApps().length > 0) {
+      app = getApp();
+      db = getFirestore(app);
+    } else {
+      app = initializeApp(firebaseConfig);
+      try {
+        // Gunakan persistentLocalCache (IndexedDB) agar update tidak hilang saat refresh
+        db = initializeFirestore(app, {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+        });
+      } catch {
+        db = getFirestore(app);
+      }
+    }
   } catch (error) {
     console.warn("Failed to initialize Firebase:", error);
   }
